@@ -34,6 +34,22 @@ app.get('/{*path}', (req, res) => {
   res.sendFile(path.join(__dirname, 'frontend', 'index.html'));
 });
 
+// --- Render Free Tier Auto-Awake Keeper ---
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+if (RENDER_URL) {
+  console.log(`[Keeper] Render External URL detected: ${RENDER_URL}. Initializing self-pinger...`);
+  // Ping every 10 minutes (600,000 ms) to prevent Render from going to sleep (Render sleeps after 15 mins of inactivity)
+  setInterval(() => {
+    const healthUrl = `${RENDER_URL.replace(/\/$/, '')}/api/health`;
+    fetch(healthUrl)
+      .then(res => res.json())
+      .then(data => console.log(`[Keeper] Self-ping successful (status: ${data.status}) at ${new Date().toISOString()}`))
+      .catch(err => console.error(`[Keeper] Self-ping failed:`, err.message));
+  }, 10 * 60 * 1000);
+} else {
+  console.log('[Keeper] Running locally or RENDER_EXTERNAL_URL not set. Self-pinger disabled.');
+}
+
 // Start
 async function start() {
   await connectDB();
