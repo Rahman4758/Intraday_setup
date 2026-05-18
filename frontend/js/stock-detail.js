@@ -8,10 +8,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   try {
-    // 1. Fetch data
-    const [scoreRes, chartRes] = await Promise.all([
+    // 1. Fetch score, chart, and option chain data in parallel
+    const [scoreRes, chartRes, chainRes] = await Promise.all([
       fetch(`/api/pil/score/${symbol}`).then(r => r.json()),
-      fetch(`/api/pil/chart/${symbol}`).then(r => r.json())
+      fetch(`/api/pil/chart/${symbol}`).then(r => r.json()),
+      fetch(`/api/data/option-chain/${symbol}`).then(r => r.json()).catch(() => ({ chain: { strikes: [] } }))
     ]);
 
     if (scoreRes.error) throw new Error(scoreRes.error);
@@ -19,6 +20,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     const scoreData = scoreRes;
     const candles = chartRes.candles;
+    const strikes = chainRes.chain?.strikes || [];
 
     // 2. Update Header & Sidebar UI
     document.getElementById('uiSymbol').textContent = symbol;
@@ -33,8 +35,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     renderPillars(scoreData.pillars);
 
-    // 3. Render Chart
-    renderChart(candles, levels.support, levels.resistance);
+    // 3. Render Chart with Candlesticks and horizontal Sensibull OI Profile
+    renderChart(candles, levels.support, levels.resistance, strikes);
 
     // Hide loading
     document.getElementById('loading').style.display = 'none';
@@ -80,7 +82,7 @@ function renderPillars(pillars) {
   });
 }
 
-function renderChart(candles, supportVal, resistanceVal) {
+function renderChart(candles, supportVal, resistanceVal, strikes = []) {
   const commonOptions = {
     layout: {
       textColor: '#8b949e',
@@ -96,10 +98,22 @@ function renderChart(candles, supportVal, resistanceVal) {
       borderColor: 'rgba(255, 255, 255, 0.1)',
       timeVisible: true,
     },
+    handleScroll: {
+      mouseWheel: true,
+      pressedMouseMove: true,
+      horzTouchDrag: true,
+      vertTouchDrag: true,
+    },
+    handleScale: {
+      mouseWheel: false,
+      pinch: true,
+      axisPressedMouseMove: true,
+    },
   };
 
   const containerPrice = document.getElementById('tvchart-price');
   const containerRsi = document.getElementById('tvchart-rsi');
+  const canvas = document.getElementById('oi-profile-canvas');
 
   // --- Price Chart ---
   const priceChart = LightweightCharts.createChart(containerPrice, commonOptions);
@@ -132,20 +146,8 @@ function renderChart(candles, supportVal, resistanceVal) {
   });
   rsiChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
 
-  // --- OI Chart (Sensibull-style histogram) ---
-  const containerOi = document.getElementById('tvchart-oi');
-  const oiChart = LightweightCharts.createChart(containerOi, {
-    ...commonOptions,
-    timeScale: { ...commonOptions.timeScale, visible: false }, // hide bottom axis on OI, price chart is master
-  });
-  const oiSeries = oiChart.addHistogramSeries({
-    color: 'rgba(179, 157, 219, 0.7)',
-    priceFormat: { type: 'volume' },
-  });
-  oiChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.0 } });
-
-  // --- Sync Time Scales across all 3 charts ---
-  function syncTime(master, ...slaves) {
+  // --- Sync Time Scales between Price and RSI charts ---
+  function syncTime(master, slave) {
     let isSyncing = false;
     const handler = (from, to) => {
       if (isSyncing) return;
@@ -155,24 +157,19 @@ function renderChart(candles, supportVal, resistanceVal) {
     };
     master.timeScale().subscribeVisibleTimeRangeChange(range => {
       if (range !== null && range.from != null && range.to != null)
-        slaves.forEach(s => handler(range, s));
+        handler(range, slave);
     });
-    slaves.forEach(slave => {
-      slave.timeScale().subscribeVisibleTimeRangeChange(range => {
-        if (range !== null && range.from != null && range.to != null) {
-          handler(range, master);
-          slaves.filter(s => s !== slave).forEach(s => handler(range, s));
-        }
-      });
+    slave.timeScale().subscribeVisibleTimeRangeChange(range => {
+      if (range !== null && range.from != null && range.to != null)
+        handler(range, master);
     });
   }
-  syncTime(priceChart, rsiChart, oiChart);
+  syncTime(priceChart, rsiChart);
 
   // --- Format Data ---
   const candleData = [];
   const volumeData = [];
   const rsiData   = [];
-  const oiData    = [];
 
   candles.forEach(c => {
     candleData.push({ time: c.date, open: c.open, high: c.high, low: c.low, close: c.close });
@@ -183,9 +180,6 @@ function renderChart(candles, supportVal, resistanceVal) {
     if (c.rsi !== null && c.rsi !== undefined) {
       rsiData.push({ time: c.date, value: c.rsi });
     }
-    if (c.oi !== null && c.oi !== undefined && c.oi > 0) {
-      oiData.push({ time: c.date, value: c.oi });
-    }
   });
 
   // Sort by time
@@ -193,10 +187,9 @@ function renderChart(candles, supportVal, resistanceVal) {
   candleData.sort(byTime);
   volumeData.sort(byTime);
   rsiData.sort(byTime);
-  oiData.sort(byTime);
   
   // Deduplicate
-  const uniqueCandles = [], uniqueVolume = [], uniqueRsi = [], uniqueOi = [];
+  const uniqueCandles = [], uniqueVolume = [], uniqueRsi = [];
   let lastTime = null;
   for (let i = 0; i < candleData.length; i++) {
     if (candleData[i].time !== lastTime) {
@@ -211,24 +204,9 @@ function renderChart(candles, supportVal, resistanceVal) {
     if (r.time !== lastRsiTime) { uniqueRsi.push(r); lastRsiTime = r.time; }
   }
 
-  // OI: color purple if OI increased from previous bar, red if decreased
-  let lastOiTime = null;
-  for (let i = 0; i < oiData.length; i++) {
-    if (oiData[i].time !== lastOiTime) {
-      const prevOi = i > 0 ? oiData[i - 1].value : oiData[i].value;
-      uniqueOi.push({
-        time:  oiData[i].time,
-        value: oiData[i].value,
-        color: oiData[i].value >= prevOi ? 'rgba(179, 157, 219, 0.8)' : 'rgba(255, 82, 82, 0.7)'
-      });
-      lastOiTime = oiData[i].time;
-    }
-  }
-
   candlestickSeries.setData(uniqueCandles);
   volumeSeries.setData(uniqueVolume);
   rsiSeries.setData(uniqueRsi);
-  if (uniqueOi.length > 0) oiSeries.setData(uniqueOi);
 
   // Add RSI Reference Lines
   rsiSeries.createPriceLine({
@@ -251,12 +229,97 @@ function renderChart(candles, supportVal, resistanceVal) {
     });
   }
 
-  priceChart.timeScale().fitContent();
+  // --- Sensibull Horizontal OI Profile drawing logic ---
+  function drawOiProfile() {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const rect = canvas.getBoundingClientRect();
+    
+    // Set device pixel ratio for super-sharp Retina/High-DPI rendering
+    canvas.width = rect.width * window.devicePixelRatio;
+    canvas.height = rect.height * window.devicePixelRatio;
+    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    
+    if (!strikes || strikes.length === 0) {
+      // Show error state if option chain empty
+      ctx.fillStyle = '#ff1744';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText('NO ACTIVE OPTION CHAIN DATA', rect.width - 75, 20);
+      return;
+    }
+    
+    // Draw Legend on top-left of chart area
+    ctx.fillStyle = '#8b949e';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    
+    // Call OI Indicator
+    ctx.fillStyle = 'rgba(255, 23, 68, 0.7)';
+    ctx.fillRect(15, 15, 8, 8);
+    ctx.fillStyle = '#8b949e';
+    ctx.fillText('Call OI (Resistance)', 28, 14);
+    
+    // Put OI Indicator
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.7)';
+    ctx.fillRect(15, 28, 8, 8);
+    ctx.fillStyle = '#8b949e';
+    ctx.fillText('Put OI (Support)', 28, 27);
+    
+    // Scale horizontal bars based on max OI
+    const maxOI = Math.max(...strikes.map(s => Math.max(s.callOI, s.putOI)));
+    if (maxOI <= 0) return;
+    
+    // Position start right before the Y-axis scale (typically 65px wide)
+    const rightBorder = rect.width - 65;
+    const maxBarWidth = 140; // Max width of horizontal profile bars
+    
+    strikes.forEach(s => {
+      const y = candlestickSeries.priceToCoordinate(s.strikePrice);
+      if (y === null || y < 0 || y > rect.height) return; // Ignore strikes off-screen
+      
+      const callWidth = (s.callOI / maxOI) * maxBarWidth;
+      const putWidth = (s.putOI / maxOI) * maxBarWidth;
+      
+      const barHeight = 4; // Height of bars
+      
+      // Draw Call OI (Red) - Top Bar
+      ctx.fillStyle = 'rgba(255, 23, 68, 0.35)';
+      ctx.fillRect(rightBorder - callWidth, y - barHeight - 1, callWidth, barHeight);
+      ctx.fillStyle = 'rgba(255, 23, 68, 0.85)';
+      ctx.fillRect(rightBorder - callWidth, y - barHeight - 1, 2, barHeight); // bright edge
+      
+      // Draw Put OI (Green) - Bottom Bar
+      ctx.fillStyle = 'rgba(0, 230, 118, 0.35)';
+      ctx.fillRect(rightBorder - putWidth, y + 1, putWidth, barHeight);
+      ctx.fillStyle = 'rgba(0, 230, 118, 0.85)';
+      ctx.fillRect(rightBorder - putWidth, y + 1, 2, barHeight); // bright edge
+      
+      // Draw Strike Price Label next to the bars
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(s.strikePrice, rightBorder - Math.max(callWidth, putWidth) - 8, y);
+    });
+  }
 
-  // Make charts responsive
+  // Draw immediately on data render
+  priceChart.timeScale().fitContent();
+  setTimeout(drawOiProfile, 100);
+
+  // Redraw when the user zooms/pans the price chart
+  priceChart.timeScale().subscribeVisibleTimeRangeChange(() => {
+    requestAnimationFrame(drawOiProfile);
+  });
+
+  // Redraw on window resize
   window.addEventListener('resize', () => {
     priceChart.applyOptions({ width: containerPrice.clientWidth, height: containerPrice.clientHeight });
     rsiChart.applyOptions({ width: containerRsi.clientWidth, height: containerRsi.clientHeight });
-    oiChart.applyOptions({ width: containerOi.clientWidth, height: containerOi.clientHeight });
+    setTimeout(drawOiProfile, 50);
   });
 }

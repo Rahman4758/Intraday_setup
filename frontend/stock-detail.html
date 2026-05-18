@@ -82,18 +82,18 @@
       flex-direction: column;
     }
     
-    #tvchart-price {
+    .price-chart-wrap {
       flex: 3;
       width: 100%;
+      position: relative;
+    }
+
+    #tvchart-price {
+      width: 100%;
+      height: 100%;
     }
 
     #tvchart-rsi {
-      flex: 1;
-      width: 100%;
-      border-top: 1px solid var(--border);
-    }
-
-    #tvchart-oi {
       flex: 1;
       width: 100%;
       border-top: 1px solid var(--border);
@@ -111,7 +111,6 @@
       pointer-events: none;
     }
     .label-rsi { color: #ff9800; }
-    .label-oi  { color: #b39ddb; }
     .pane-wrap { position: relative; display: flex; flex-direction: column; flex: 1; }
 
     /* Sidebar / Pillars */
@@ -232,14 +231,13 @@
 
   <main>
     <div class="chart-container">
-      <div id="tvchart-price"></div>
+      <div class="price-chart-wrap">
+        <div id="tvchart-price"></div>
+        <canvas id="oi-profile-canvas" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></canvas>
+      </div>
       <div class="pane-wrap">
         <span class="pane-label label-rsi">RSI (14)</span>
         <div id="tvchart-rsi"></div>
-      </div>
-      <div class="pane-wrap">
-        <span class="pane-label label-oi">OI</span>
-        <div id="tvchart-oi"></div>
       </div>
     </div>
     
@@ -265,6 +263,6 @@
 
   <!-- Lightweight Charts CDN (Pinned to v4.1.1 to prevent API breaking changes) -->
   <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
-  <script src="/js/stock-detail.js?v=4"></script>
+  <script src="/js/stock-detail.js?v=6"></script>
 </body>
 </html>

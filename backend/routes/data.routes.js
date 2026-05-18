@@ -20,9 +20,13 @@ router.get('/quote/:symbol', async (req, res) => {
 router.get('/option-chain/:symbol', async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    const stock = await Stock.findOne({ symbol, isActive: true });
+    const stock = await Stock.findOne({ symbol });
     if (!stock) return res.status(404).json({ error: 'Stock not in watchlist' });
-    const expiry = req.query.expiry || getNextMonthlyExpiry().toISOString().split('T')[0];
+    
+    // Default to the stock's F&O expiry date if saved, else calculate next expiry
+    const defaultExpiry = stock.foExpiry || getNextMonthlyExpiry().toISOString().split('T')[0];
+    const expiry = req.query.expiry || defaultExpiry;
+    
     const chain = await getOptionChain(stock.instrumentKeyEQ, expiry);
     res.json({ symbol, expiry, chain });
   } catch (err) {

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const PILScore = require('../models/PILScore');
+const Stock = require('../models/Stock');
 const { runFullScan } = require('../services/streak-tracker');
 const { getMarketQuotes, getHistoricalCandles } = require('../services/upstox-data');
 const { getInstrumentMap } = require('../utils/instrument-resolver');
@@ -65,14 +66,23 @@ router.get('/history/:symbol', async (req, res) => {
 router.get('/chart/:symbol', async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    const instrMap = getInstrumentMap();
-    const instrKey = instrMap[symbol];
+    
+    // Look up the stock in the database to fetch its F&O key
+    const stock = await Stock.findOne({ symbol });
+    
+    let instrKey;
+    if (stock) {
+      instrKey = stock.instrumentKeyFO || stock.instrumentKeyEQ;
+    } else {
+      const instrMap = getInstrumentMap();
+      instrKey = instrMap[symbol];
+    }
     
     if (!instrKey) {
       return res.status(404).json({ error: `Instrument key not found for ${symbol}` });
     }
     
-    // Fetch last 60 days of daily candles
+    // Fetch last 60 days of daily candles using the resolved F&O key
     const candles = await getHistoricalCandles(instrKey, 60);
 
     // Upstox historical data for daily candles may not include the live (today's) running candle.
@@ -102,6 +112,7 @@ router.get('/chart/:symbol', async (req, res) => {
         lastCandle.high = Math.max(lastCandle.high, liveData.high || liveData.ltp);
         lastCandle.low = Math.min(lastCandle.low, liveData.low || liveData.ltp);
         lastCandle.volume = Math.max(lastCandle.volume, liveData.volume || 0);
+        lastCandle.oi = liveData.oi || lastCandle.oi || 0;
       }
     }
 
