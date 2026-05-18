@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stock Detail | ANTIGRAVITY</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel-bg: rgba(255, 255, 255, 0.03);
+      --border: rgba(255, 255, 255, 0.1);
+      --text-primary: #f8f9fa;
+      --text-muted: #8b949e;
+      --accent: #2979ff;
+      --success: #00e676;
+      --danger: #ff1744;
+      --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    body {
+      background-color: var(--bg);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Header */
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0,0,0,0.2);
+    }
+    
+    .header-left {
+      display: flex;
+      align-items: baseline;
+      gap: 16px;
+    }
+    
+    .symbol-name {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+    
+    .ltp {
+      font-family: var(--font-mono);
+      font-size: 1.4rem;
+      color: var(--success);
+    }
+    
+    .score-badge {
+      background: var(--accent);
+      color: white;
+      padding: 6px 12px;
+      border-radius: 4px;
+      font-weight: bold;
+      font-family: var(--font-mono);
+      font-size: 1.2rem;
+    }
+
+    /* Main Content */
+    main {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Chart Area */
+    .chart-container {
+      flex: 3;
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+    
+    #tvchart-price {
+      flex: 3;
+      width: 100%;
+    }
+
+    #tvchart-rsi {
+      flex: 1;
+      width: 100%;
+      border-top: 1px solid var(--border);
+    }
+
+    #tvchart-oi {
+      flex: 1;
+      width: 100%;
+      border-top: 1px solid var(--border);
+    }
+
+    .pane-label {
+      position: absolute;
+      top: 4px;
+      left: 8px;
+      font-size: 0.7rem;
+      font-family: var(--font-mono);
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      z-index: 10;
+      pointer-events: none;
+    }
+    .label-rsi { color: #ff9800; }
+    .label-oi  { color: #b39ddb; }
+    .pane-wrap { position: relative; display: flex; flex-direction: column; flex: 1; }
+
+    /* Sidebar / Pillars */
+    .sidebar {
+      flex: 1;
+      min-width: 350px;
+      max-width: 450px;
+      background: var(--panel-bg);
+      overflow-y: auto;
+      padding: 20px;
+    }
+
+    .section-title {
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    .pillar-card {
+      background: rgba(0,0,0,0.3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+
+    .pillar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .pillar-name {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .pillar-score {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      font-weight: bold;
+      color: var(--accent);
+    }
+
+    .pillar-score.zero {
+      color: var(--danger);
+    }
+
+    .pillar-reason {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+
+    .levels-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .level-box {
+      background: rgba(0,0,0,0.3);
+      border: 1px solid var(--border);
+      padding: 12px;
+      border-radius: 6px;
+      text-align: center;
+    }
+
+    .level-box.support { border-bottom: 3px solid var(--success); }
+    .level-box.resistance { border-bottom: 3px solid var(--danger); }
+
+    .level-label {
+      display: block;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    .level-value {
+      font-family: var(--font-mono);
+      font-size: 1.2rem;
+      font-weight: bold;
+    }
+
+    /* Loading overlay */
+    #loading {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: var(--bg);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      z-index: 100;
+      font-family: var(--font-mono);
+      font-size: 1.2rem;
+      color: var(--accent);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="loading">LOADING DATA...</div>
+
+  <header>
+    <div class="header-left">
+      <div class="symbol-name" id="uiSymbol">--</div>
+      <div class="ltp" id="uiLtp">₹--</div>
+    </div>
+    <div class="score-badge" id="uiScore">--/15</div>
+  </header>
+
+  <main>
+    <div class="chart-container">
+      <div id="tvchart-price"></div>
+      <div class="pane-wrap">
+        <span class="pane-label label-rsi">RSI (14)</span>
+        <div id="tvchart-rsi"></div>
+      </div>
+      <div class="pane-wrap">
+        <span class="pane-label label-oi">OI</span>
+        <div id="tvchart-oi"></div>
+      </div>
+    </div>
+    
+    <div class="sidebar">
+      <div class="section-title">Key OI Levels</div>
+      <div class="levels-grid">
+        <div class="level-box support">
+          <span class="level-label">Demand Zone (Support)</span>
+          <span class="level-value" id="uiSupport">--</span>
+        </div>
+        <div class="level-box resistance">
+          <span class="level-label">Supply Zone (Resistance)</span>
+          <span class="level-value" id="uiResistance">--</span>
+        </div>
+      </div>
+
+      <div class="section-title">Institutional Score Breakdown</div>
+      <div id="pillarsContainer">
+        <!-- Pillars injected via JS -->
+      </div>
+    </div>
+  </main>
+
+  <!-- Lightweight Charts CDN (Pinned to v4.1.1 to prevent API breaking changes) -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+  <script src="/js/stock-detail.js?v=4"></script>
+</body>
+</html>
