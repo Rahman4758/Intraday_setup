@@ -1,12 +1,16 @@
 require('dotenv').config();
+
 const mongoose = require('mongoose');
+
 const Stock = require('./backend/models/Stock');
 const StreakState = require('./backend/models/StreakState');
+
 const { resolveInstrumentKeys } = require('./backend/utils/instrument-resolver');
 const { runFullScan } = require('./backend/services/streak-tracker');
+
 const dbConfig = require('./backend/config/db');
 
-// Top Nifty 50 + FNO Heavyweights (approx 100)
+// Top Nifty 50 + FNO Heavyweights
 const top100 = [
   "RELIANCE", "TCS", "HDFCBANK", "ICICIBANK", "INFY", "ITC", "SBIN", "BHARTIARTL", "BAJFINANCE", "LARSEN",
   "KOTAKBANK", "AXISBANK", "HCLTECH", "ASIANPAINT", "MARUTI", "SUNPHARMA", "TITAN", "ULTRACEMCO", "TATASTEEL", "NTPC",
@@ -21,82 +25,164 @@ const top100 = [
   "PFC", "RECLTD", "SAIL", "TATACHEM", "TATACOMM", "TATAPOWER", "TORNTPOWER", "UBL", "VOLTAS", "ZEEL"
 ];
 
-async function addAndScan() {
-  console.log("Starting Bulk Add & Scan...");
-  await dbConfig(); // Connect to MongoDB
+async function processStock(symbol) {
 
-  let added = 0;
-  for (const symbol of top100) {
     const upper = symbol.toUpperCase().trim();
-    
-    // Check if already exists
-    let stock = await Stock.findOne({ symbol: upper });
-    if (!stock) {
-      // Resolve keys
-      let keys = { eq: '', fo: '' };
-      try {
-        keys = resolveInstrumentKeys(upper);
-      } catch (e) {}
 
-      if (keys.eq) { // Only add if we have an instrument key mapping
-        await Stock.create({
-          symbol: upper,
-          instrumentKeyEQ: keys.eq,
-          instrumentKeyFO: keys.fo || keys.eq,
-          sector: 'Nifty/FNO',
-          isActive: true
+    try {
+
+        // Check existing stock
+        let stock = await Stock.findOne({ symbol: upper });
+
+        // Resolve keys
+        let keys;
+
+        try {
+            keys = resolveInstrumentKeys(upper);
+        } catch (err) {
+            console.error(`[KEY ERROR] ${upper}`, err.message);
+            return null;
+        }
+
+        // Skip if no EQ key
+        if (!keys?.eq) {
+            console.log(`[SKIPPED] No instrument key for ${upper}`);
+            return null;
+        }
+
+        // Create new stock
+        if (!stock) {
+
+            stock = await Stock.create({
+                symbol: upper,
+                instrumentKeyEQ: keys.eq,
+                instrumentKeyFO: keys.fo || keys.eq,
+                sector: 'Nifty/FNO',
+                isActive: true
+            });
+
+            console.log(`[ADDED] ${upper}`);
+
+        }
+
+        // Reactivate inactive stock
+        else if (!stock.isActive) {
+
+            stock.isActive = true;
+
+            stock.instrumentKeyEQ = keys.eq;
+            stock.instrumentKeyFO = keys.fo || keys.eq;
+
+            await stock.save();
+
+            console.log(`[REACTIVATED] ${upper}`);
+        }
+
+        // Create/update streak state
+        await StreakState.findOneAndUpdate(
+            { symbol: upper },
+            { symbol: upper },
+            {
+                upsert: true,
+                new: true
+            }
+        );
+
+        return stock;
+
+    } catch (err) {
+
+        console.error(`[FAILED] ${upper}`, err.message);
+
+        return null;
+    }
+}
+
+async function addAndScan() {
+
+    console.log("\n=================================");
+    console.log("STARTING BULK STOCK PROCESS");
+    console.log("=================================\n");
+
+    try {
+
+        // Connect DB
+        await dbConfig();
+
+        console.log("[DB CONNECTED]\n");
+
+        // Parallel processing
+        const results = await Promise.allSettled(
+            top100.map(symbol => processStock(symbol))
+        );
+
+        // Count successful
+        const successful = results.filter(
+            r => r.status === 'fulfilled' && r.value
+        ).length;
+
+        console.log(`\nProcessed Stocks: ${successful}`);
+
+        const activeCount = await Stock.countDocuments({
+            isActive: true
         });
 
-        await StreakState.findOneAndUpdate(
-          { symbol: upper },
-          { symbol: upper },
-          { upsert: true }
+        console.log(`Active Stocks: ${activeCount}`);
+
+        console.log("\n=================================");
+        console.log("RUNNING FULL EOD SCAN");
+        console.log("=================================\n");
+
+        // Run scanner
+        const scanResult = await runFullScan({
+            isExpiryWeek: false,
+            isPostResults: false,
+            isMonday: false,
+            isFiiBuying: false
+        });
+
+        console.log(
+            `Scan Complete! Evaluated ${scanResult.results.length} stocks`
         );
-        added++;
-        console.log(`[+] Added ${upper}`);
-      } else {
-         console.log(`[!] Could not resolve Upstox key for ${upper}, skipping.`);
-      }
-    } else if (!stock.isActive) {
-      stock.isActive = true;
-      await stock.save();
-      added++;
-      console.log(`[+] Reactivated ${upper}`);
+
+        console.log(
+            `Nifty Context Change: ${scanResult.niftyChange}%`
+        );
+
+        // Top setups
+        console.log("\n========== TOP 10 SETUPS ==========\n");
+
+        const topSetups = scanResult.results.slice(0, 10);
+
+        topSetups.forEach((res, index) => {
+
+            console.log(
+                `${index + 1}. ${res.symbol.padEnd(12)} | Score: ${res.finalScore}/15 | Band: ${res.band}`
+            );
+
+            console.log(
+                `   P1:${res.pillars.P1.score} | ` +
+                `P2:${res.pillars.P2.score} | ` +
+                `P3:${res.pillars.P3.score} | ` +
+                `P4:${res.pillars.P4.score} | ` +
+                `P5:${res.pillars.P5.score} | ` +
+                `P6:${res.pillars.P6.score}`
+            );
+
+            console.log("-----------------------------------");
+        });
+
+    } catch (err) {
+
+        console.error("\n[FATAL ERROR]", err);
+
+    } finally {
+
+        // Proper cleanup
+        await mongoose.disconnect();
+
+        console.log("\n[DB DISCONNECTED]");
     }
-  }
-
-  console.log(`\nAdded/Reactivated ${added} stocks.`);
-  console.log("Total tracked stocks:", await Stock.countDocuments({ isActive: true }));
-  
-  console.log("\n=================================");
-  console.log("RUNNING FULL EOD SCAN FOR ALL STOCKS...");
-  console.log("=================================");
-  
-  // Run scan
-  try {
-      const scanResult = await runFullScan({
-          isExpiryWeek: false,
-          isPostResults: false,
-          isMonday: false,
-          isFiiBuying: false
-      });
-      
-      console.log(`\nScan Complete! Evaluated ${scanResult.results.length} stocks.`);
-      console.log(`Nifty Change Context: ${scanResult.niftyChange}%`);
-      
-      // Show top 10
-      console.log("\n--- TOP 10 HIGH PROBABILITY SETUPS ---");
-      const top = scanResult.results.slice(0, 10);
-      top.forEach((res, i) => {
-          console.log(`${i+1}. ${res.symbol.padEnd(12)} | Score: ${res.finalScore}/15 | Band: ${res.band}`);
-          console.log(`   Pillars: P1:${res.pillars.P1.score} P2:${res.pillars.P2.score} P3:${res.pillars.P3.score} P4:${res.pillars.P4.score} P5:${res.pillars.P5.score} P6:${res.pillars.P6.score}`);
-      });
-  } catch (err) {
-      console.error("Scan Failed:", err);
-  }
-
-  mongoose.disconnect();
-  process.exit(0);
 }
 
 addAndScan();
