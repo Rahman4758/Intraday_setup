@@ -126,3 +126,5 @@ function calculateRSI(
       avgLoss
    };
 }
+
+module.exports = { calculateRSI };
