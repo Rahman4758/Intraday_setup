@@ -1,586 +1,510 @@
-/**
- * ANTIGRAVITY PULLBACK ENGINE
- * Intraday Strong Pullback Capture — 8 Signal PQS Scorer
- * Pure logic only — no DB, no API calls, no side effects
- */
-
-// ═══════════════════════════════════════════════════
-// MATH HELPERS
-// ═══════════════════════════════════════════════════
-
-function calculateEMA(closes, period) {
-  if (closes.length < period) return [];
-  const k = 2 / (period + 1);
-  const emas = [];
-  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
-  emas.push(ema);
-  for (let i = period; i < closes.length; i++) {
-    ema = closes[i] * k + ema * (1 - k);
-    emas.push(ema);
-  }
-  return emas;
-}
-
-function calculateVWAP(candles) {
-  let cumPV = 0, cumVol = 0;
-  for (const c of candles) {
-    const typicalPrice = (c.high + c.low + c.close) / 3;
-    cumPV += typicalPrice * c.volume;
-    cumVol += c.volume;
-  }
-  return cumVol > 0 ? cumPV / cumVol : 0;
-}
-
-function calculateFibLevels(low, high) {
-  const range = high - low;
-  return {
-    fib382: high - range * 0.382,
-    fib500: high - range * 0.500,
-    fib618: high - range * 0.618
-  };
-}
-
-function isEMASloping(emas) {
-  if (emas.length < 3) return false;
-  const last3 = emas.slice(-3);
-  return last3[1] > last3[0] && last3[2] > last3[1];
-}
+'use strict';
 
 /**
- * Detect last N swing lows on 5-min candles
- * A swing low = a candle whose low is lower than the candle before AND after it
+ * Professional Pullback Detector — v2
+ *
+ * Fixes applied vs v1:
+ *  1. findImpulseSwingLow  — now returns the LOWEST pivot before sessionHighIdx
+ *  2. Session high         — strict > (no double-top drift); keeps earliest occurrence
+ *  3. pullbackLow          — sliced to current candle only, not beyond
+ *  4. ATR                  — Wilder's smoothed method, not simple average
+ *  5. Pivot strength       — 3 bars each side (was 2 — too noisy on 5m)
+ *  6. Trend validation     — EMA21 position + slope, and HH/HL swing structure
+ *  7. Pullback character   — candle body ratio + declining-range check
+ *  8. scoreFibDepth        — removed; quality lives in detectPullbackZone output only
  */
-function detectSwingLows(candles, count = 3) {
-  const lows = [];
-  for (let i = 1; i < candles.length - 1; i++) {
-    if (candles[i].low < candles[i - 1].low && candles[i].low < candles[i + 1].low) {
-      lows.push(candles[i].low);
-      if (lows.length >= count + 2) break; // collect a few extra
+
+// ─────────────────────────────────────────────────────────────
+// CONFIG  (tune per instrument / timeframe here, not inline)
+// ─────────────────────────────────────────────────────────────
+
+const CONFIG = {
+  MIN_CANDLES:           20,   // minimum history required
+  PIVOT_STRENGTH:         3,   // bars each side for swing detection
+  EMA_PERIOD:            21,
+  EMA_SLOPE_WINDOW:       3,   // bars to measure EMA slope over
+  ATR_PERIOD:            14,
+  ATR_MULTIPLE_MAX:       4,   // pullback volatility ceiling
+  RETRACEMENT_MIN:       20,   // % — below = not a real pullback
+  RETRACEMENT_MAX:       75,   // % — above = likely reversal
+  FIB_GOLDEN_MIN:        38,   // % — golden zone start
+  FIB_GOLDEN_MAX:        62,   // % — golden zone end
+  FIB_SHALLOW_MIN:       23,   // % — shallow trend continuation zone
+  BODY_RATIO_MAX:        0.6,  // pullback candles should be smallish bodies
+  MIN_BASE_FOR_AMPLIFIER: 4,
+  RR_MIN:               1.5,
+};
+
+// ─────────────────────────────────────────────────────────────
+// INTERNAL HELPERS
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * True Range for a single candle.
+ * Handles the no-previous-candle edge case gracefully.
+ */
+function _trueRange(current, previous) {
+  if (!previous) return current.high - current.low;
+  return Math.max(
+    current.high - current.low,
+    Math.abs(current.high - previous.close),
+    Math.abs(current.low  - previous.close),
+  );
+}
+
+/**
+ * Wilder's smoothed ATR.
+ * Seeds with a simple average for the first period, then applies
+ * exponential smoothing: ATR = (prevATR × (n-1) + TR) / n
+ */
+function calculateATR(candles, period = CONFIG.ATR_PERIOD) {
+  if (!candles || candles.length < period + 1) return 0;
+
+  // seed
+  let atr = 0;
+  for (let i = 1; i <= period; i++) {
+    atr += _trueRange(candles[i], candles[i - 1]);
+  }
+  atr /= period;
+
+  // smooth forward
+  for (let i = period + 1; i < candles.length; i++) {
+    atr = (atr * (period - 1) + _trueRange(candles[i], candles[i - 1])) / period;
+  }
+
+  return atr;
+}
+
+/**
+ * Proper EMA using exponential smoothing seeded with SMA.
+ * Returns a value-aligned array (null before the seed period completes).
+ */
+function _calculateEMAArray(candles, period) {
+  if (!candles || candles.length < period) return [];
+  const k      = 2 / (period + 1);
+  const result = new Array(candles.length).fill(null);
+
+  let seed = 0;
+  for (let i = 0; i < period; i++) seed += candles[i].close;
+  result[period - 1] = seed / period;
+
+  for (let i = period; i < candles.length; i++) {
+    result[i] = candles[i].close * k + result[i - 1] * (1 - k);
+  }
+  return result;
+}
+
+/**
+ * Returns all confirmed pivot highs and pivot lows using N-bar lookback.
+ * Strict comparison — equal neighbours do not qualify.
+ */
+function _findSwingPoints(candles, strength = CONFIG.PIVOT_STRENGTH) {
+  const highs = [];
+  const lows  = [];
+
+  for (let i = strength; i < candles.length - strength; i++) {
+    let isHigh = true;
+    let isLow  = true;
+
+    for (let j = i - strength; j <= i + strength; j++) {
+      if (j === i) continue;
+      if (candles[j].high >= candles[i].high) isHigh = false;
+      if (candles[j].low  <= candles[i].low ) isLow  = false;
     }
-  }
-  return lows.slice(-count); // return most recent N
-}
 
-/**
- * Find session high from candles so far
- */
-function getSessionHigh(candles) {
-  return Math.max(...candles.map(c => c.high));
-}
-
-/**
- * Get average volume for the session candles
- */
-function getAvgVolume(candles) {
-  if (!candles.length) return 0;
-  return candles.reduce((sum, c) => sum + c.volume, 0) / candles.length;
-}
-
-/**
- * Identify which candles are part of the current pullback
- * (consecutive falling candles from the session high, working backwards)
- */
-function getPullbackCandles(candles, sessionHigh) {
-  const highIdx = candles.findIndex(c => c.high === sessionHigh);
-  if (highIdx < 0) return candles.slice(-3); // fallback
-  const afterHigh = candles.slice(highIdx);
-  const pullbackCandleList = [];
-  for (const c of afterHigh) {
-    // Collect candles that are falling or neutral
-    if (c.close <= c.open || c.high <= sessionHigh) {
-      pullbackCandleList.push(c);
-    } else {
-      break; // price recovered above session high — pullback over
-    }
-  }
-  return pullbackCandleList.length > 0 ? pullbackCandleList : afterHigh.slice(-3);
-}
-
-// ═══════════════════════════════════════════════════
-// PREREQUISITE CHECK — Trend must exist before scoring
-// ═══════════════════════════════════════════════════
-
-/**
- * Checks if an intraday uptrend exists before allowing pullback scoring.
- * Returns { intact: bool, checks: {}, reason: string }
- */
-/**
- * @param {Object[]} candles5m  — 5-min candles for today (session)
- * @param {number}   vwap       — calculated VWAP for the session
- * @param {number}   niftyChangePercent — Nifty % change today
- * @param {number}   peakRSI    — highest RSI seen in today's session
- * @param {number}   prevDayClose — yesterday's daily closing price (from historical API)
- */
-function checkPrerequisites(candles5m, vwap, niftyChangePercent, peakRSI, prevDayClose) {
-  const currentPrice = candles5m[candles5m.length - 1]?.close || 0;
-
-  // Today's opening price = first 5-min candle's open
-  const todayOpen = candles5m[0]?.open || 0;
-
-  // Open above PrevClose check:
-  // Gap-down stock (open < prevClose) = weakness from the start → skip
-  // If prevDayClose not available (0), we skip this check (default true)
-  const openAbovePrevClose = prevDayClose > 0
-    ? todayOpen >= prevDayClose * 0.998 // allow 0.2% tolerance for flat opens
-    : true;
-
-  // Detect HH-HL structure on 5-min (need at least 6 candles = 30 mins of data)
-  let hhhlCount = 0;
-  if (candles5m.length >= 6) {
-    const highs = candles5m.map(c => c.high);
-    for (let i = 2; i < highs.length; i++) {
-      if (highs[i] > highs[i - 2]) hhhlCount++;
-    }
+    if (isHigh) highs.push({ idx: i, value: candles[i].high });
+    if (isLow ) lows .push({ idx: i, value: candles[i].low  });
   }
 
-  // EMA20 slope: last 3 EMA20 values must be rising
-  const closes = candles5m.map(c => c.close);
-  const ema20s = calculateEMA(closes, 20);
-  const ema20Sloping = isEMASloping(ema20s);
+  return { highs, lows };
+}
 
-  const checks = {
-    aboveVWAP: currentPrice > vwap,
-    ema20SlopingUp: ema20Sloping,
-    hhhlVisible: hhhlCount >= 2,
-    rsiWas55: peakRSI >= 55,
-    openAbovePrevClose,
-    niftyAligned: niftyChangePercent > -0.5
-  };
+// ─────────────────────────────────────────────────────────────
+// TREND VALIDATION
+// ─────────────────────────────────────────────────────────────
 
-  const passCount = Object.values(checks).filter(Boolean).length;
-  // Need at least 4/6 checks — if open check is unavailable, lower threshold to 3/5
-  const threshold = prevDayClose > 0 ? 4 : 3;
-  const intact = passCount >= threshold;
+/**
+ * EMA position + slope check.
+ * Pass: current close > EMA(period) AND EMA is sloping up.
+ */
+function _validateTrendByEMA(candles) {
+  const ema     = _calculateEMAArray(candles, CONFIG.EMA_PERIOD);
+  const lastIdx = candles.length - 1;
+  const currEMA = ema[lastIdx];
+  if (currEMA == null) return { valid: false, reason: `Insufficient data for EMA${CONFIG.EMA_PERIOD}`, ema: null };
+
+  const price        = candles[lastIdx].close;
+  const priceAbove   = price > currEMA;
+  const pastEMA      = ema[lastIdx - CONFIG.EMA_SLOPE_WINDOW];
+  const slopingUp    = pastEMA != null && currEMA > pastEMA;
+  const valid        = priceAbove && slopingUp;
 
   return {
-    intact,
-    passCount,
-    checks,
-    reason: intact
-      ? `Trend intact (${passCount}/6 checks passed)`
-      : `Trend NOT intact (${passCount}/6 checks) — no pullback entry`
+    valid,
+    ema:       parseFloat(currEMA.toFixed(2)),
+    priceAbove,
+    slopingUp,
+    reason: valid
+      ? `Price (${price.toFixed(2)}) above EMA${CONFIG.EMA_PERIOD} (${currEMA.toFixed(2)}), slope up`
+      : !priceAbove
+        ? `Price below EMA${CONFIG.EMA_PERIOD} — no uptrend`
+        : `EMA${CONFIG.EMA_PERIOD} slope flat or down`,
   };
 }
 
-// ═══════════════════════════════════════════════════
-// PULLBACK ZONE DETECTOR
-// ═══════════════════════════════════════════════════
+/**
+ * Higher-highs / higher-lows structure check.
+ * Requires at least 2 confirmed pivot highs AND 2 pivot lows, both rising.
+ */
+function _validateTrendByStructure(candles) {
+  const { highs, lows } = _findSwingPoints(candles);
+  const MIN = 2;
+
+  if (highs.length < MIN || lows.length < MIN) {
+    return {
+      valid:  false,
+      reason: `Not enough swing points (${highs.length} highs, ${lows.length} lows — need ${MIN} each)`,
+    };
+  }
+
+  const [h0, h1] = highs.slice(-2);
+  const [l0, l1] = lows.slice(-2);
+  const isHH     = h1.value > h0.value;
+  const isHL     = l1.value > l0.value;
+  const valid    = isHH && isHL;
+  const weak     = !valid && (isHH || isHL);
+
+  return {
+    valid,
+    weak,
+    isHH,
+    isHL,
+    lastHighs: [h0, h1],
+    lastLows:  [l0, l1],
+    reason: valid
+      ? `HH (${h0.value}→${h1.value}) + HL (${l0.value}→${l1.value})`
+      : weak
+        ? `Partial: ${isHH ? 'HH ✓' : 'LH ✗'} / ${isHL ? 'HL ✓' : 'LL ✗'}`
+        : 'Lower highs + lower lows — downtrend',
+  };
+}
 
 /**
- * Determines if price is currently in a pullback from session high.
- * Returns { inPullback, pullbackDepthPct, pullbackLow, sessionHigh }
+ * Combined trend gate.
+ * STRONG  — both EMA and structure confirm
+ * WEAK    — one confirms (trade with reduced size / tighter stop)
+ * INVALID — neither confirms, skip entirely
+ */
+function validateTrend(candles) {
+  const ema       = _validateTrendByEMA(candles);
+  const structure = _validateTrendByStructure(candles);
+  const both      = ema.valid && structure.valid;
+  const either    = ema.valid || structure.valid;
+
+  return {
+    valid:      either,
+    confidence: both ? 'STRONG' : either ? 'WEAK' : 'INVALID',
+    ema,
+    structure,
+    reason: both
+      ? `${ema.reason} | ${structure.reason}`
+      : either
+        ? `Partial trend: EMA ${ema.valid ? '✓' : '✗'} / Structure ${structure.valid ? '✓' : '✗'}`
+        : 'No trend confirmation',
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// SWING LOW  (fixed)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Returns the LOWEST confirmed pivot low that appears BEFORE sessionHighIdx.
+ * v1 bug: loop kept overwriting with the latest pivot, not the lowest.
+ */
+function findImpulseSwingLow(candles, sessionHighIdx) {
+  let swingLow = Infinity;
+  const strength = CONFIG.PIVOT_STRENGTH;
+
+  for (let i = strength; i < sessionHighIdx - strength; i++) {
+    let isPivotLow = true;
+    for (let j = i - strength; j <= i + strength; j++) {
+      if (j === i) continue;
+      if (candles[j].low <= candles[i].low) { isPivotLow = false; break; }
+    }
+    if (isPivotLow && candles[i].low < swingLow) {
+      swingLow = candles[i].low;
+    }
+  }
+
+  // fallback to first candle's low if no pivot found
+  return swingLow === Infinity ? candles[0].low : swingLow;
+}
+
+// ─────────────────────────────────────────────────────────────
+// PULLBACK CHARACTER  (new)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Distinguishes a healthy pullback from a reversal:
+ *   - Pullback candles should have small bodies (indecision / digestion)
+ *   - Average range of pullback candles should be below average impulse range
+ *
+ * @param {Array}  allCandles
+ * @param {number} sessionHighIdx
+ * @param {number} currentIdx      - index of the current candle (last confirmed)
+ */
+function assessPullbackCharacter(allCandles, sessionHighIdx, currentIdx) {
+  const pullbackCandles = allCandles.slice(sessionHighIdx, currentIdx + 1);
+  if (pullbackCandles.length === 0) return { healthy: false, reason: 'No pullback candles' };
+
+  const avgBodyRatio = pullbackCandles.reduce((sum, c) => {
+    const body  = Math.abs(c.close - c.open);
+    const range = c.high - c.low;
+    return sum + (range > 0 ? body / range : 0);
+  }, 0) / pullbackCandles.length;
+
+  // impulse candles: everything before the session high
+  const impulseCandles = allCandles.slice(0, sessionHighIdx + 1);
+  const avgImpulseRange = impulseCandles.reduce((s, c) => s + (c.high - c.low), 0) / impulseCandles.length;
+  const avgPullbackRange = pullbackCandles.reduce((s, c) => s + (c.high - c.low), 0) / pullbackCandles.length;
+
+  const smallBodies      = avgBodyRatio  < CONFIG.BODY_RATIO_MAX;
+  const decliningRange   = avgPullbackRange < avgImpulseRange;
+  const healthy          = smallBodies && decliningRange;
+
+  return {
+    healthy,
+    avgBodyRatio:    parseFloat(avgBodyRatio.toFixed(3)),
+    avgImpulseRange: parseFloat(avgImpulseRange.toFixed(2)),
+    avgPullbackRange:parseFloat(avgPullbackRange.toFixed(2)),
+    smallBodies,
+    decliningRange,
+    reason: healthy
+      ? `Small bodies (${(avgBodyRatio * 100).toFixed(0)}%) + declining range — healthy pullback`
+      : !smallBodies
+        ? `Large candle bodies (${(avgBodyRatio * 100).toFixed(0)}%) — may be impulsive reversal`
+        : `Pullback range ≥ impulse range — avoid`,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN DETECTOR
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * detectPullbackZone — full analysis of a 5-minute candle array.
+ *
+ * Returns an object with:
+ *   inPullback        {boolean}
+ *   reason            {string}
+ *   retracementPct    {number}
+ *   pullbackQuality   {'IDEAL_FIB'|'SHALLOW'|'DEEP'|'NORMAL'}
+ *   trendConfidence   {'STRONG'|'WEAK'|'INVALID'}
+ *   character         {object}   pullback health assessment
+ *   sessionHigh       {number}
+ *   impulseLow        {number}
+ *   currentPrice      {number}
+ *   pullbackLow       {number}
+ *   atr               {number}
+ *   atrMultiple       {number}
+ *   impulseRange      {number}
+ *   trend             {object}   full trend validation detail
  */
 function detectPullbackZone(candles5m) {
-  const sessionHigh = getSessionHigh(candles5m);
-  const currentPrice = candles5m[candles5m.length - 1]?.close || 0;
-  const pullbackDepthPct = sessionHigh > 0
-    ? ((sessionHigh - currentPrice) / sessionHigh) * 100
-    : 0;
-
-  // A valid pullback is at least 0.3% but not more than 8% from the session high
-  const inPullback = pullbackDepthPct >= 0.3 && pullbackDepthPct <= 8.0;
-
-  // Find lowest point after session high
-  const highIdx = candles5m.findIndex(c => c.high === sessionHigh);
-  const afterHigh = candles5m.slice(Math.max(highIdx, 0));
-  const pullbackLow = afterHigh.length > 0
-    ? Math.min(...afterHigh.map(c => c.low))
-    : currentPrice;
-
-  return { inPullback, pullbackDepthPct, pullbackLow, sessionHigh };
-}
-
-// ═══════════════════════════════════════════════════
-// 8 SIGNAL SCORERS
-// ═══════════════════════════════════════════════════
-
-/** S1: Volume Behavior — volume should DRY UP on pullback candles */
-function scoreVolumeBehavior(pullbackCandles, sessionAvgVol) {
-  if (!pullbackCandles || pullbackCandles.length < 2) {
-    return { score: 0, flag: 'INSUFFICIENT_DATA', reason: 'Need ≥2 pullback candles' };
+  // ── Guard ────────────────────────────────────
+  if (!candles5m || candles5m.length < CONFIG.MIN_CANDLES) {
+    return { inPullback: false, reason: `Need ≥${CONFIG.MIN_CANDLES} candles (got ${candles5m?.length ?? 0})`, retracementPct: 0 };
   }
 
-  const vols = pullbackCandles.map(c => c.volume);
-
-  // Check for high-volume danger candle (> 150% of avg)
-  const hasHighVolDanger = vols.some(v => v > sessionAvgVol * 1.5);
-  if (hasHighVolDanger) {
-    return { score: 0, flag: 'HIGH_VOL_DANGER', reason: 'High-vol pullback candle — aggressive selling detected' };
+  // ── Trend gate ───────────────────────────────
+  const trend = validateTrend(candles5m);
+  if (!trend.valid) {
+    return { inPullback: false, reason: `Trend invalid — ${trend.reason}`, retracementPct: 0, trend };
   }
 
-  // Check if each successive candle has lower volume (drying up)
-  let dryingUp = true;
-  for (let i = 1; i < vols.length; i++) {
-    if (vols[i] >= vols[i - 1]) { dryingUp = false; break; }
+  // ── Session high (earliest occurrence of strict max) ─
+  let sessionHigh    = -Infinity;
+  let sessionHighIdx = -1;
+
+  for (let i = 0; i < candles5m.length; i++) {
+    if (candles5m[i].high > sessionHigh) {       // strict > keeps the earliest high
+      sessionHigh    = candles5m[i].high;
+      sessionHighIdx = i;
+    }
   }
 
-  if (dryingUp && vols.length >= 2) {
-    return { score: 2, flag: 'VOL_DRY', reason: 'Volume drying up on each pullback candle — sellers exhausting' };
+  // Need enough candles before the high to form an impulse
+  if (sessionHighIdx < CONFIG.PIVOT_STRENGTH * 2) {
+    return { inPullback: false, reason: 'Session high too early — no impulse leg', retracementPct: 0, trend };
   }
 
-  // Check if volume is below session average on pullback candles
-  const avgPullbackVol = vols.reduce((a, b) => a + b, 0) / vols.length;
-  if (avgPullbackVol < sessionAvgVol) {
-    return { score: 1, flag: 'VOL_LOW', reason: 'Pullback volume below session average — no aggressive selling' };
+  // Need at least a few candles after the high for a pullback to exist
+  const currentIdx = candles5m.length - 1;
+  if (currentIdx <= sessionHighIdx) {
+    return { inPullback: false, reason: 'No candles after session high yet', retracementPct: 0, trend };
   }
 
-  return { score: 0, flag: 'VOL_NEUTRAL', reason: 'Volume not confirming pullback quality' };
-}
+  // ── Impulse swing low ────────────────────────
+  const impulseLow   = findImpulseSwingLow(candles5m, sessionHighIdx);
+  const currentPrice = candles5m[currentIdx].close;
+  const impulseRange = sessionHigh - impulseLow;
 
-/** S2: OI Behavior — OI should BUILD during the pullback (institutions buying dip) */
-function scoreOIBehavior(pullbackCandles) {
-  if (!pullbackCandles || pullbackCandles.length < 2) {
-    return { score: 1, flag: 'OI_FLAT', reason: 'OI data insufficient — neutral' };
+  if (impulseRange <= 0) {
+    return { inPullback: false, reason: 'Invalid impulse range (high ≤ low)', retracementPct: 0, trend };
   }
 
-  const ois = pullbackCandles.map(c => c.oi || 0);
-  const hasData = ois.some(v => v > 0);
-  if (!hasData) {
-    return { score: 1, flag: 'OI_FLAT', reason: 'OI data not available — neutral' };
+  // ── Fib retracement ──────────────────────────
+  const retracementPct = ((sessionHigh - currentPrice) / impulseRange) * 100;
+
+  // ── ATR (Wilder) ──────────────────────────────
+  const atr          = calculateATR(candles5m);
+  const pullbackPts  = sessionHigh - currentPrice;
+  const atrMultiple  = atr > 0 ? pullbackPts / atr : 0;
+
+  // ── Pullback low (current candle only, not beyond) ──
+  const pullbackLow = Math.min(
+    ...candles5m.slice(sessionHighIdx, currentIdx + 1).map(c => c.low),
+  );
+
+  // ── Depth guards ─────────────────────────────
+  if (retracementPct < CONFIG.RETRACEMENT_MIN) {
+    return _result(false, `Too shallow (${retracementPct.toFixed(1)}% < ${CONFIG.RETRACEMENT_MIN}%)`,
+      { retracementPct, impulseLow, sessionHigh, pullbackLow, atr, atrMultiple, impulseRange, trend });
   }
 
-  const firstOI = ois[0];
-  const lastOI = ois[ois.length - 1];
-  const oiChange = firstOI > 0 ? ((lastOI - firstOI) / firstOI) * 100 : 0;
-
-  if (oiChange > 0.5) {
-    return { score: 2, flag: 'OI_BUILD', reason: `OI building +${oiChange.toFixed(1)}% during pullback — institutional accumulation` };
-  }
-  if (oiChange >= -0.5) {
-    return { score: 1, flag: 'OI_FLAT', reason: 'OI stable during pullback — neutral' };
+  if (retracementPct > CONFIG.RETRACEMENT_MAX) {
+    return _result(false, `Too deep (${retracementPct.toFixed(1)}% > ${CONFIG.RETRACEMENT_MAX}%) — likely reversal`,
+      { retracementPct, impulseLow, sessionHigh, pullbackLow, atr, atrMultiple, impulseRange, trend });
   }
 
-  return { score: 0, flag: 'OI_FALLING', reason: `OI falling ${oiChange.toFixed(1)}% — longs exiting, potential reversal` };
-}
-
-/** S3: RSI Floor — RSI should dip to 38–50 and bounce (not break below 38) */
-function scoreRSIFloor(currentRSI, minRSIInSession) {
-  if (currentRSI < 38) {
-    return { score: 0, flag: 'RSI_BROKEN', reason: `RSI ${currentRSI.toFixed(1)} broke below 38 — trend structure damaged` };
+  if (atrMultiple > CONFIG.ATR_MULTIPLE_MAX) {
+    return _result(false, `Volatility too high (${atrMultiple.toFixed(1)}× ATR)`,
+      { retracementPct, impulseLow, sessionHigh, pullbackLow, atr, atrMultiple, impulseRange, trend });
   }
 
-  // RSI dipped to floor zone and is now higher (bouncing)
-  if (minRSIInSession >= 38 && minRSIInSession <= 50 && currentRSI > minRSIInSession) {
-    return { score: 2, flag: 'RSI_FLOOR_BOUNCE', reason: `RSI bounced from ${minRSIInSession.toFixed(1)} floor zone (38–50) — momentum returning` };
-  }
+  // ── Pullback character ────────────────────────
+  const character = assessPullbackCharacter(candles5m, sessionHighIdx, currentIdx);
 
-  // RSI stayed above 50 — very strong trend, never even dipped to floor
-  if (currentRSI >= 50) {
-    return { score: 1, flag: 'RSI_HOLD', reason: `RSI ${currentRSI.toFixed(1)} holding above 50 — trend very strong, no floor touch needed` };
-  }
+  // ── Fib quality ───────────────────────────────
+  let pullbackQuality;
+  if      (retracementPct >= CONFIG.FIB_GOLDEN_MIN && retracementPct <= CONFIG.FIB_GOLDEN_MAX) pullbackQuality = 'IDEAL_FIB';
+  else if (retracementPct >= CONFIG.FIB_SHALLOW_MIN && retracementPct < CONFIG.FIB_GOLDEN_MIN) pullbackQuality = 'SHALLOW';
+  else if (retracementPct > CONFIG.FIB_GOLDEN_MAX)                                             pullbackQuality = 'DEEP';
+  else                                                                                          pullbackQuality = 'NORMAL';
 
-  // RSI in pullback zone but not yet bouncing
-  if (currentRSI >= 38 && currentRSI < 50) {
-    return { score: 1, flag: 'RSI_IN_ZONE', reason: `RSI ${currentRSI.toFixed(1)} in pullback zone — waiting for bounce confirmation` };
-  }
-
-  return { score: 0, flag: 'RSI_WEAK', reason: `RSI ${currentRSI.toFixed(1)} out of zone` };
-}
-
-/** S4: Key Level Confluence — price near VWAP, EMA, or key level */
-function scoreKeyLevel(currentPrice, vwap, ema20, prevDayHigh) {
-  const TOLERANCE = 0.003; // 0.3% proximity tolerance
-  const levels = [];
-
-  if (vwap > 0 && Math.abs(currentPrice - vwap) / vwap <= TOLERANCE) {
-    levels.push('VWAP');
-  }
-  if (ema20 > 0 && Math.abs(currentPrice - ema20) / ema20 <= TOLERANCE) {
-    levels.push('EMA20');
-  }
-  if (prevDayHigh > 0 && Math.abs(currentPrice - prevDayHigh) / prevDayHigh <= TOLERANCE) {
-    levels.push('PDH');
-  }
-
-  if (levels.length >= 2) {
-    return { score: 2, flag: 'CONFLUENCE', reason: `Price at confluence zone: ${levels.join(' + ')} — high-probability support` };
-  }
-  if (levels.length === 1) {
-    return { score: 1, flag: 'SINGLE_LEVEL', reason: `Price at ${levels[0]} support level` };
-  }
-
-  return { score: 0, flag: 'NO_LEVEL', reason: 'Price not near any key support level' };
-}
-
-/** S5: Fibonacci Depth — pullback at 38.2%, 50%, or 61.8% retracement */
-function scoreFibDepth(pullbackDepthPct) {
-  // Fib 50–61.8% = ideal zone
-  if (pullbackDepthPct >= 45 && pullbackDepthPct <= 65) {
-    return { score: 2, flag: 'FIB_50_61', reason: `Pullback depth ${pullbackDepthPct.toFixed(1)}% — at 50–61.8% Fib zone (ideal entry)` };
-  }
-  // Fib 38.2% zone
-  if (pullbackDepthPct >= 33 && pullbackDepthPct < 45) {
-    return { score: 1, flag: 'FIB_38', reason: `Pullback depth ${pullbackDepthPct.toFixed(1)}% — at 38.2% Fib (shallow but valid)` };
-  }
-  // Too deep — beyond 61.8%
-  if (pullbackDepthPct > 65) {
-    return { score: 0, flag: 'FIB_DEEP', reason: `Pullback depth ${pullbackDepthPct.toFixed(1)}% — beyond 61.8%, trend may be reversing` };
-  }
-
-  return { score: 0, flag: 'FIB_SHALLOW', reason: `Pullback depth ${pullbackDepthPct.toFixed(1)}% — too shallow, not yet a pullback` };
-}
-
-/** S6: Bounce Candle — last candle must be green with volume */
-function scoreBounceCandle(candles5m, sessionAvgVol) {
-  if (!candles5m || candles5m.length < 2) {
-    return { score: 0, flag: 'NO_DATA', reason: 'Insufficient candles' };
-  }
-
-  const last = candles5m[candles5m.length - 1];
-  const isGreen = last.close > last.open;
-
-  if (!isGreen) {
-    return { score: 0, flag: 'NO_BOUNCE', reason: 'Last candle is red — still in pullback, wait for bounce' };
-  }
-
-  const bodySize = Math.abs(last.close - last.open);
-  const range = last.high - last.low;
-  const bodyRatio = range > 0 ? bodySize / range : 0;
-
-  // Strong bounce = green candle + volume >= avg + decent body
-  if (last.volume >= sessionAvgVol && bodyRatio >= 0.4) {
-    return { score: 2, flag: 'STRONG_BOUNCE', reason: `Strong green bounce candle with volume ${(last.volume / sessionAvgVol).toFixed(1)}× avg — buyers confirmed` };
-  }
-
-  // Weak bounce = green candle but low volume
-  return { score: 1, flag: 'WEAK_BOUNCE', reason: 'Weak green candle at support — low volume bounce, wait for confirmation' };
-}
-
-/** S7: Higher Low Structure — new pullback low must be above last swing low */
-function scoreHLStructure(candles5m, pullbackLow) {
-  const swingLows = detectSwingLows(candles5m, 3);
-
-  if (swingLows.length < 2) {
-    return { score: 1, flag: 'HL_UNKNOWN', reason: 'Not enough swing lows to confirm HL structure' };
-  }
-
-  const lastConfirmedSwingLow = swingLows[swingLows.length - 2]; // second to last
-
-  if (pullbackLow > lastConfirmedSwingLow) {
-    return {
-      score: 2,
-      flag: 'HL_INTACT',
-      reason: `Higher low intact — current pullback low (${pullbackLow.toFixed(1)}) above last swing low (${lastConfirmedSwingLow.toFixed(1)})`
-    };
-  }
-
-  return {
-    score: 0,
-    flag: 'HL_BROKEN',
-    reason: `Structure broken — pullback low (${pullbackLow.toFixed(1)}) broke last swing low (${lastConfirmedSwingLow.toFixed(1)})`
-  };
-}
-
-/** S8: EMA Touch — price touching or bouncing from rising 20 EMA */
-function scoreEMATouch(currentPrice, ema20, ema9) {
-  const TOLERANCE = 0.004; // 0.4%
-
-  const nearEMA20 = ema20 > 0 && Math.abs(currentPrice - ema20) / ema20 <= TOLERANCE;
-  const nearEMA9 = ema9 > 0 && Math.abs(currentPrice - ema9) / ema9 <= TOLERANCE;
-
-  if (nearEMA20 || nearEMA9) {
-    const which = nearEMA20 ? '20 EMA' : '9 EMA';
-    return { score: 1, flag: 'EMA_TOUCH', reason: `Price touching rising ${which} — dynamic support active` };
-  }
-
-  return { score: 0, flag: 'NO_EMA_TOUCH', reason: 'Price not at EMA support zone' };
-}
-
-/** BONUS: RSI Divergence — price lower low but RSI higher low (RARE +2) */
-function scoreRSIDivergence(prevPullbackRSI, currentRSI, prevPullbackLow, currentPullbackLow) {
-  if (!prevPullbackRSI || !prevPullbackLow) {
-    return { score: 0, flag: 'NO_DIVERGE', reason: 'No previous pullback data for divergence check' };
-  }
-
-  const priceLowerLow = currentPullbackLow < prevPullbackLow;
-  const rsiHigherLow = currentRSI > prevPullbackRSI;
-
-  if (priceLowerLow && rsiHigherLow) {
-    return { score: 2, flag: 'RSI_DIVERGE', reason: `🔥 Bullish divergence: Price made lower low but RSI is higher — RARE, powerful signal` };
-  }
-
-  return { score: 0, flag: 'NO_DIVERGE', reason: 'No RSI divergence detected' };
-}
-
-// ═══════════════════════════════════════════════════
-// PQS AGGREGATOR
-// ═══════════════════════════════════════════════════
-
-function computePQS(signals) {
-  return Object.values(signals).reduce((sum, s) => sum + (s.score || 0), 0);
-}
-
-function interpretPQSBand(pqs) {
-  if (pqs <= 3) return {
-    grade: 'WEAK', action: 'Skip — risk too high', positionFactor: 0,
-    color: '#ff4757', band: 'WEAK'
-  };
-  if (pqs <= 6) return {
-    grade: 'MODERATE', action: 'Enter with caution. Small size. Tight SL.', positionFactor: 0.5,
-    color: '#ffa502', band: 'MODERATE'
-  };
-  if (pqs <= 9) return {
-    grade: 'STRONG', action: 'High confidence pullback. Standard entry.', positionFactor: 1.0,
-    color: '#1dd1a1', band: 'STRONG'
-  };
-  if (pqs <= 12) return {
-    grade: 'VERY_STRONG', action: 'All signals firing. Increase size.', positionFactor: 1.25,
-    color: '#00f5d4', band: 'VERY_STRONG'
-  };
-  return {
-    grade: 'EXCEPTIONAL', action: 'Rare. Maximum conviction. Biggest allowed size.', positionFactor: 1.5,
-    color: '#ff6348', band: 'EXCEPTIONAL'
-  };
-}
-
-/**
- * Calculate entry zone for the pullback trade
- * Entry: 1 tick above bounce candle high
- * SL: Below bounce candle low or pullback low
- * T1: Session high (prior swing high)
- * T2: Entry + (Entry - SL) × 2 (measured move)
- */
-function calcEntryZone(candles5m, pullbackLow, sessionHigh) {
-  const last = candles5m[candles5m.length - 1];
-  if (!last) return { entryPrice: 0, stopLoss: 0, target1: 0, target2: 0 };
-
-  const tick = last.close * 0.001; // 0.1% as tick approximation
-  const entryPrice = parseFloat((last.high + tick).toFixed(2));
-  const stopLoss = parseFloat((Math.min(last.low, pullbackLow) * 0.999).toFixed(2));
-  const target1 = parseFloat(sessionHigh.toFixed(2)); // Previous swing high
-  const riskPoints = entryPrice - stopLoss;
-  const target2 = parseFloat((entryPrice + riskPoints * 2).toFixed(2));
-
-  return { entryPrice, stopLoss, target1, target2, riskPoints };
-}
-
-// ═══════════════════════════════════════════════════
-// MAIN SCAN FUNCTION
-// ═══════════════════════════════════════════════════
-
-/**
- * Scan a single stock for pullback setup
- * @param {string}   symbol
- * @param {Object[]} candles5m      — 5-min candles (chronological, today's session)
- * @param {number}   niftyChangePct — Nifty % change today
- * @param {number}   prevDayHigh    — Yesterday's high (for S4 key level check)
- * @param {number}   prevDayClose   — Yesterday's close (for open-above-prevClose prereq)
- * @param {number}   currentRSI     — Latest 5-min RSI
- * @param {number}   minRSIToday    — Lowest RSI seen in today's session
- * @returns {Object} Full scan result
- */
-function scanStock(symbol, candles5m, niftyChangePct, prevDayHigh, prevDayClose, currentRSI, minRSIToday) {
-  if (!candles5m || candles5m.length < 12) {
-    return {
-      symbol, pqs: 0, grade: 'INSUFFICIENT_DATA',
-      reason: `Only ${candles5m?.length || 0} candles — need ≥12`, trendIntact: false
-    };
-  }
-
-  const closes = candles5m.map(c => c.close);
-  const vwap = calculateVWAP(candles5m);
-  const sessionAvgVol = getAvgVolume(candles5m);
-  const { inPullback, pullbackDepthPct, pullbackLow, sessionHigh } = detectPullbackZone(candles5m);
-
-  // EMA calculations
-  const ema20List = calculateEMA(closes, 20);
-  const ema9List = calculateEMA(closes, 9);
-  const ema20 = ema20List[ema20List.length - 1] || 0;
-  const ema9 = ema9List[ema9List.length - 1] || 0;
-
-  // STEP 1: Prerequisite check (trend must exist)
-  // peakRSI = highest RSI value seen in the session (not just current)
-  const peakRSI = Math.max(currentRSI, minRSIToday || 0);
-  const prereq = checkPrerequisites(candles5m, vwap, niftyChangePct, peakRSI, prevDayClose);
-
-  if (!prereq.intact) {
-    return {
-      symbol, pqs: 0, grade: 'NO_TREND', band: 'WEAK', color: '#4a5568',
-      reason: prereq.reason, trendIntact: false,
-      prereqChecks: prereq.checks,
-      vwap, ema20, ema9, sessionHigh, currentPrice: closes[closes.length - 1]
-    };
-  }
-
-  // STEP 2: Is there an active pullback?
-  if (!inPullback) {
-    const currentPrice = closes[closes.length - 1];
-    const depthMsg = pullbackDepthPct < 0.3
-      ? `Price only ${pullbackDepthPct.toFixed(2)}% from high — no pullback yet`
-      : `Price ${pullbackDepthPct.toFixed(2)}% from high — pullback too deep`;
-
-    return {
-      symbol, pqs: 0, grade: 'NO_PULLBACK', band: 'WEAK', color: '#4a5568',
-      reason: depthMsg, trendIntact: true,
-      prereqChecks: prereq.checks,
-      currentPrice, vwap, ema20, ema9, sessionHigh, pullbackDepthPct
-    };
-  }
-
-  // STEP 3: Score all 8 signals
-  const pullbackCandles = getPullbackCandles(candles5m, sessionHigh);
-
-  const signals = {
-    S1_vol: scoreVolumeBehavior(pullbackCandles, sessionAvgVol),
-    S2_oi: scoreOIBehavior(pullbackCandles),
-    S3_rsi: scoreRSIFloor(currentRSI, minRSIToday || currentRSI),
-    S4_level: scoreKeyLevel(closes[closes.length - 1], vwap, ema20, prevDayHigh),
-    S5_fib: scoreFibDepth(pullbackDepthPct),
-    S6_bounce: scoreBounceCandle(candles5m, sessionAvgVol),
-    S7_hl: scoreHLStructure(candles5m, pullbackLow),
-    S8_ema: scoreEMATouch(closes[closes.length - 1], ema20, ema9)
-  };
-
-  // STEP 4: Compute PQS
-  const pqs = computePQS(signals);
-  const interpretation = interpretPQSBand(pqs);
-  const entryZone = calcEntryZone(candles5m, pullbackLow, sessionHigh);
-
-  const currentPrice = closes[closes.length - 1];
-
-  return {
-    symbol,
-    pqs,
-    grade: interpretation.grade,
-    band: interpretation.band,
-    color: interpretation.color,
-    action: interpretation.action,
-    positionFactor: interpretation.positionFactor,
-    trendIntact: true,
-    inPullback: true,
-    reason: `PQS ${pqs} — ${interpretation.grade}`,
-    prereqChecks: prereq.checks,
-    signals,
-    entryZone,
+  return _result(true, `Valid pullback — ${retracementPct.toFixed(1)}% retracement, ${trend.confidence} trend, ${character.healthy ? 'healthy character' : 'weak character'}`, {
+    retracementPct,
+    pullbackQuality,
+    impulseLow,
+    sessionHigh,
     currentPrice,
-    vwap: parseFloat(vwap.toFixed(2)),
-    ema20: parseFloat(ema20.toFixed(2)),
-    ema9: parseFloat(ema9.toFixed(2)),
-    sessionHigh: parseFloat(sessionHigh.toFixed(2)),
-    pullbackLow: parseFloat(pullbackLow.toFixed(2)),
-    pullbackDepthPct: parseFloat(pullbackDepthPct.toFixed(2)),
-    currentRSI: parseFloat(currentRSI.toFixed(1)),
-    sessionAvgVol: Math.round(sessionAvgVol)
-  };
+    pullbackLow,
+    atr,
+    atrMultiple,
+    impulseRange,
+    trend,
+    trendConfidence: trend.confidence,
+    character,
+  });
 }
+
+/** Shapes the return object consistently, rounds all floats. */
+function _result(inPullback, reason, data) {
+  const round = v => typeof v === 'number' ? parseFloat(v.toFixed(2)) : v;
+  const out = { inPullback, reason };
+  for (const [k, v] of Object.entries(data)) {
+    out[k] = round(v);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────
+// RISK / REWARD VALIDATOR  (unchanged — was already correct)
+// ─────────────────────────────────────────────────────────────
+
+function validateRiskReward(entryPrice, stopLoss, target) {
+  const risk   = entryPrice - stopLoss;
+  const reward = target - entryPrice;
+
+  if (risk <= 0) return { valid: false, rr: 0, reason: 'Stop loss must be below entry' };
+
+  const rr = parseFloat((reward / risk).toFixed(2));
+  return rr >= CONFIG.RR_MIN
+    ? { valid: true,  rr, reason: `Good RR (${rr}:1)` }
+    : { valid: false, rr, reason: `Poor RR (${rr}:1 — need ≥${CONFIG.RR_MIN})` };
+}
+
+// ─────────────────────────────────────────────────────────────
+// PUBLIC API
+// ─────────────────────────────────────────────────────────────
 
 module.exports = {
-  scanStock,
-  computePQS,
-  interpretPQSBand,
-  checkPrerequisites,
   detectPullbackZone,
-  calculateVWAP,
-  calculateEMA,
-  calculateFibLevels,
-  // individual scorers (for testing)
-  scoreVolumeBehavior,
-  scoreOIBehavior,
-  scoreRSIFloor,
-  scoreKeyLevel,
-  scoreFibDepth,
-  scoreBounceCandle,
-  scoreHLStructure,
-  scoreEMATouch,
-  scoreRSIDivergence
+  validateTrend,
+  validateRiskReward,
+  calculateATR,
+  findImpulseSwingLow,
+  assessPullbackCharacter,
+  CONFIG,
 };
+
+// ─────────────────────────────────────────────────────────────
+// SMOKE TESTS  —  node pullback_detector.js
+// ─────────────────────────────────────────────────────────────
+
+if (require.main === module) {
+  function c(close, hi, lo) {
+    return { open: close - 0.2, high: hi, low: lo, close };
+  }
+
+  // ── Realistic uptrend with three HH/HL legs then a healthy pullback ──
+  const good = [
+    c(100,101,99), c(101,102,100), c(99,101,98),  c(102,103,100),
+    c(100,102,99), c(103,104,101), c(101,103,100), c(104,105,102),
+    c(105,106,104), c(107,108,105), c(109,110,107), c(111,112,109),
+    c(110,112,109), c(108,110,107), c(107,109,106),
+    c(110,111,108), c(112,113,110), c(114,115,112), c(116,117,114), c(118,119,116),
+    c(116,118,115), c(114,116,113), c(113,115,112),
+    c(116,117,114), c(118,119,116), c(120,121,118), c(122,123,120),
+    c(124,125,122), c(126,127,124),
+    c(124,126,123), c(122,124,121), c(121,123,120),
+  ];
+
+  // ── Downtrend — should be blocked at trend gate ──
+  const down = Array.from({ length: 35 }, (_, i) => c(140 - i, 141 - i, 139 - i));
+
+  // ── Uptrend but reversal character (large-body red candles after high) ──
+  const reversal = [
+    ...good.slice(0, 29),
+    c(118, 127, 114),   // big red body
+    c(112, 119, 110),   // big red body
+    c(108, 113, 106),   // big red body
+  ];
+
+  const cases = [
+    { label: 'Clean uptrend + healthy pullback',   candles: good },
+    { label: 'Downtrend (blocked at trend gate)',  candles: down },
+    { label: 'Reversal character after high',      candles: reversal },
+  ];
+
+  cases.forEach(({ label, candles }) => {
+    const r = detectPullbackZone(candles);
+    console.log(`\n── ${label}`);
+    console.log(`   inPullback     : ${r.inPullback}`);
+    console.log(`   reason         : ${r.reason}`);
+    if (r.inPullback) {
+      console.log(`   quality        : ${r.pullbackQuality}`);
+      console.log(`   retracement    : ${r.retracementPct}%`);
+      console.log(`   trendConfidence: ${r.trendConfidence}`);
+      console.log(`   character      : ${r.character?.healthy ? 'healthy' : 'weak'} — ${r.character?.reason}`);
+      console.log(`   ATR multiple   : ${r.atrMultiple}×`);
+    }
+  });
+
+  // ── RR check ──
+  console.log('\n── RR validation');
+  console.log('  2:1 trade  :', validateRiskReward(120, 118, 124));
+  console.log('  1:1 trade  :', validateRiskReward(120, 118, 122));
+  console.log('  bad stop   :', validateRiskReward(120, 121, 124));
+}
