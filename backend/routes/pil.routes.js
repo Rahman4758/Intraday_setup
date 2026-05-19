@@ -6,13 +6,7 @@ const { runFullScan } = require('../services/streak-tracker');
 const { getMarketQuotes, getHistoricalCandles } = require('../services/upstox-data');
 const { getInstrumentMap } = require('../utils/instrument-resolver');
 const { calculateRSI } = require('../services/rsi-calculator');
-
-// Amplifier context — stored in memory per session
-let amplifierContext = {
-  isExpiryWeek: false,
-  postResultsDayNum: 0,
-  fiiBuyStreak: 0
-};
+const AmplifierContext = require('../models/AmplifierContext');
 
 // Run full PIL scan for all active stocks
 router.post('/scan', async (req, res) => {
@@ -27,7 +21,33 @@ router.post('/scan', async (req, res) => {
       });
     }
 
-    const ctx = { ...amplifierContext, ...req.body };
+   let amplifierContext =
+    await AmplifierContext.findOne();
+
+if (!amplifierContext) {
+
+    amplifierContext =
+        await AmplifierContext.create({});
+}
+
+const ctx = {
+
+    isExpiryWeek:
+        req.body.isExpiryWeek ??
+        amplifierContext.isExpiryWeek,
+
+    postResultsDayNum:
+        req.body.postResultsDayNum ??
+        amplifierContext.postResultsDayNum,
+
+    fiiBuyStreak:
+        req.body.fiiBuyStreak ??
+        amplifierContext.fiiBuyStreak,
+
+    isSectorOutperforming:
+        req.body.isSectorOutperforming ??
+        amplifierContext.isSectorOutperforming
+};
     console.log('[PIL] Starting full EOD scan...');
     const scanResult = await runFullScan(ctx);
     console.log(`[PIL] Scan complete — ${scanResult.results.length} stocks scored`);
@@ -174,18 +194,99 @@ router.get('/priority', async (req, res) => {
 });
 
 // Set amplifier context
-router.post('/amplifiers', (req, res) => {
-  const { isExpiryWeek, postResultsDayNum, fiiBuyStreak, isSectorOutperforming } = req.body;
-  if (isExpiryWeek !== undefined) amplifierContext.isExpiryWeek = isExpiryWeek;
-  if (postResultsDayNum !== undefined) amplifierContext.postResultsDayNum = postResultsDayNum;
-  if (fiiBuyStreak !== undefined) amplifierContext.fiiBuyStreak = fiiBuyStreak;
-  if (isSectorOutperforming !== undefined) amplifierContext.isSectorOutperforming = isSectorOutperforming;
-  res.json({ amplifierContext, message: 'Amplifiers updated' });
+router.post('/amplifiers', async (req, res) => {
+
+    try {
+
+        let amplifierContext =
+            await AmplifierContext.findOne();
+
+        if (!amplifierContext) {
+
+            amplifierContext =
+                await AmplifierContext.create({});
+        }
+
+        const {
+
+            isExpiryWeek,
+            postResultsDayNum,
+            fiiBuyStreak,
+            isSectorOutperforming
+
+        } = req.body;
+
+        if (isExpiryWeek !== undefined) {
+            amplifierContext.isExpiryWeek =
+                isExpiryWeek;
+        }
+
+        if (postResultsDayNum !== undefined) {
+            amplifierContext.postResultsDayNum =
+                postResultsDayNum;
+        }
+
+        if (fiiBuyStreak !== undefined) {
+            amplifierContext.fiiBuyStreak =
+                fiiBuyStreak;
+        }
+
+        if (isSectorOutperforming !== undefined) {
+            amplifierContext.isSectorOutperforming =
+                isSectorOutperforming;
+        }
+
+        await amplifierContext.save();
+
+        return res.json({
+
+            amplifierContext,
+
+            message: 'Amplifiers updated'
+        });
+
+    } catch (err) {
+
+        console.error(
+            '[AMPLIFIER] Update error:',
+            err
+        );
+
+        return res.status(500).json({
+            error: err.message
+        });
+    }
 });
 
 // Get current amplifier context
-router.get('/amplifiers', (req, res) => {
-  res.json({ amplifierContext });
+router.get('/amplifiers', async (req, res) => {
+
+    try {
+
+        let amplifierContext =
+            await AmplifierContext.findOne();
+
+        if (!amplifierContext) {
+
+            amplifierContext =
+                await AmplifierContext.create({});
+        }
+
+        return res.json({
+            amplifierContext
+        });
+
+    } catch (err) {
+
+        console.error(
+            '[AMPLIFIER] Fetch error:',
+            err
+        );
+
+        return res.status(500).json({
+            error: err.message
+        });
+    }
 });
 
 module.exports = router;
