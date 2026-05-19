@@ -164,18 +164,34 @@
     <h2 style="font-family:var(--font-mono);font-size:1.5rem;color:var(--text-primary);margin-bottom:24px;">📊 Paper Trading Performance</h2>
     
     <!-- Top Metrics -->
-    <div style="display:flex; gap: 20px; margin-bottom: 30px;" id="analyticsMetrics">
-      <div class="score-card glass" style="flex:1;">
-        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase;">Total Trades</div>
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px;" id="analyticsMetrics">
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Total Trades</div>
         <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono);" id="statTotalTrades">--</div>
       </div>
-      <div class="score-card glass" style="flex:1;">
-        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase;">Win Rate</div>
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Win Rate</div>
         <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono); color:var(--band-alert);" id="statWinRate">--%</div>
       </div>
-      <div class="score-card glass" style="flex:1;">
-        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase;">Total PnL</div>
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Total PnL</div>
         <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono);" id="statTotalPnL">₹--</div>
+      </div>
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Profit Factor</div>
+        <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono);" id="statProfitFactor">--</div>
+      </div>
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Expectancy</div>
+        <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono);" id="statExpectancy">₹--</div>
+      </div>
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Max Profit</div>
+        <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono); color:var(--band-alert);" id="statMaxProfit">₹--</div>
+      </div>
+      <div class="score-card glass">
+        <div style="color:var(--text-muted); font-size:0.8rem; text-transform:uppercase; margin-bottom:8px;">Max Loss</div>
+        <div style="font-size:2rem; font-weight:700; font-family:var(--font-mono); color:#ff4757;" id="statMaxLoss">₹--</div>
       </div>
     </div>
 

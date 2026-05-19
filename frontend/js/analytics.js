@@ -144,37 +144,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const stats = data.data;
 
-      statTotalTrades.textContent =
-        stats.totalTrades || 0;
+      if (statTotalTrades)
+        statTotalTrades.textContent = stats.totalTrades || 0;
 
-      statWinRate.textContent =
-        `${stats.winRate || 0}%`;
+      if (statWinRate)
+        statWinRate.textContent = `${stats.winRate || 0}%`;
 
-      statTotalPnL.textContent =
-        `₹${stats.totalPnLAmount || 0}`;
+      if (statTotalPnL) {
+        statTotalPnL.textContent = `₹${stats.totalPnLAmount || 0}`;
+        statTotalPnL.style.color = Number(stats.totalPnLAmount) >= 0
+          ? 'var(--band-alert)' : '#ff4757';
+      }
 
-      statProfitFactor.textContent =
-        stats.profitFactor || '0';
+      if (statProfitFactor)
+        statProfitFactor.textContent = stats.profitFactor || '0';
 
-      statExpectancy.textContent =
-        `₹${stats.expectancy || 0}`;
+      if (statExpectancy) {
+        statExpectancy.textContent = `₹${stats.expectancy || 0}`;
+        statExpectancy.style.color = Number(stats.expectancy) >= 0
+          ? 'var(--band-alert)' : '#ff4757';
+      }
 
-      statMaxProfit.textContent =
-        `₹${stats.maxProfit || 0}`;
+      if (statMaxProfit)
+        statMaxProfit.textContent = `₹${stats.maxProfit || 0}`;
 
-      statMaxLoss.textContent =
-        `₹${stats.maxLoss || 0}`;
-
-      // COLORS
-      statTotalPnL.style.color =
-        Number(stats.totalPnLAmount) >= 0
-          ? 'var(--band-alert)'
-          : '#ff4757';
-
-      statExpectancy.style.color =
-        Number(stats.expectancy) >= 0
-          ? 'var(--band-alert)'
-          : '#ff4757';
+      if (statMaxLoss)
+        statMaxLoss.textContent = `₹${stats.maxLoss || 0}`;
 
     } catch (err) {
 
