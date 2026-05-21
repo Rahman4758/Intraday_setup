@@ -162,10 +162,19 @@ router.get('/chart/:symbol', async (req, res) => {
 router.get('/priority', async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
-    const targetDate = req.query.date || today;
+    let targetDate = req.query.date || today;
 
     // Get all scores for the target date
-    const scores = await PILScore.find({ date: targetDate }).sort({ finalScore: -1 });
+    let scores = await PILScore.find({ date: targetDate }).sort({ finalScore: -1 });
+    
+    // Fallback: If no scores exist for today and no specific date was queried, get the most recent date with scores
+    if (scores.length === 0 && !req.query.date) {
+      const latestScore = await PILScore.findOne().sort({ date: -1 });
+      if (latestScore) {
+        targetDate = latestScore.date;
+        scores = await PILScore.find({ date: targetDate }).sort({ finalScore: -1 });
+      }
+    }
     
     // Sync Live LTP for the top results to ensure accuracy
     const keys = scores.slice(0, 50).map(s => s.instrumentKeyFO || s.instrumentKeyEQ).filter(Boolean);

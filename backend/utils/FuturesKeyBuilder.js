@@ -2,9 +2,10 @@ const axios = require('axios');
 const zlib = require('zlib');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
-// Cache path for the built futures map (refresh daily)
-const CACHE_PATH = path.join(__dirname, '..', 'data', 'futures_key_map.json');
+// Cache path for the built futures map (refresh daily) - saved in OS temp dir to prevent triggering node --watch in development
+const CACHE_PATH = path.join(os.tmpdir(), 'antigravity_futures_key_map.json');
 
 /**
  * Known symbol remaps: NSE EQ symbol → F&O CSV symbol prefix

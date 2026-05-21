@@ -132,8 +132,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const result = await API.runScan(ctx);
 
       if (result.results && result.results.length > 0) {
+        const dashboardResults = result.results.filter(s => s.finalScore >= 5);
+        renderDashboard(dashboardResults);
         const priorityResults = result.results.filter(s => s.finalScore >= 7);
-        renderDashboard(priorityResults);
         renderPriority(priorityResults);
         Components.showToast(`Scan complete — ${priorityResults.length} high priority setups found`, 'success');
       } else {
@@ -184,9 +185,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // ═══════ LOAD PREVIOUS SCORES ═══════
   async function loadLatestScores() {
     try {
-      const { priority, date } = await API.getPriority();
+      const { priority, allResults, date } = await API.getPriority();
+      if (allResults && allResults.length > 0) {
+        const dashboardResults = allResults.filter(s => s.finalScore >= 5);
+        renderDashboard(dashboardResults);
+      }
       if (priority && priority.length > 0) {
-        renderDashboard(priority);
         renderPriority(priority);
       }
     } catch { /* No previous scores */ }
