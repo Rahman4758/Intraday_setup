@@ -40,4 +40,7 @@ module.exports = {
 
   // How often the engine processes a new tick (in milliseconds) — 30 seconds
   POLL_INTERVAL: 30000,
+
+  // Maximum concurrent stock processing tasks (protects client rate limit)
+  POLL_CONCURRENCY: 4,
 };

@@ -418,6 +418,10 @@ const {
 } = require('./upstox-data');
 
 const {
+  buildNiftyChangeMap
+} = require('../utils/nifty-history-loader');
+
+const {
   calculateRSI
 } = require('./rsi-calculator');
 
@@ -555,7 +559,8 @@ async function withTimeout(
 // RECALCULATE STREAKS
 // -----------------------------------
 function recalculateStreaks(
-  candles
+  candles,
+  changeMap = null
 ) {
 
   let p1_streak = 0;
@@ -643,10 +648,12 @@ function recalculateStreaks(
       p2_streak
     );
 
-    // historical nifty unavailable
+    const candleDateKey = String(today.date || '').substring(0, 10);
+    const liveNiftyChange = (changeMap && changeMap.get(candleDateKey)) ?? 0;
+
     finalP3 = scoreP3(
       stockChange,
-      0,
+      liveNiftyChange,
       p3_streak
     );
 
@@ -1279,7 +1286,8 @@ async function scanStock(
     // STREAKS
     const historicalStreaks =
       recalculateStreaks(
-        candles
+        candles,
+        niftyData.changeMap
       );
 
     // INVALIDATIONS
@@ -1535,6 +1543,14 @@ async function runFullScan(
 
         changePercent: 0
       };
+    }
+
+    // Historical Nifty Change Map (Fix 2)
+    try {
+      niftyData.changeMap = await buildNiftyChangeMap(getHistoricalCandles, 90);
+    } catch (err) {
+      console.error('[PIL] Failed to build Nifty history map:', err.message);
+      niftyData.changeMap = new Map();
     }
 
     // BATCH QUOTES

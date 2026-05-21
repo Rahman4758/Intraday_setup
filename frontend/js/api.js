@@ -35,7 +35,10 @@ const API = {
 
   // PIL
   async runScan(amplifiers = {}) {
-    return this._fetch('/pil/scan', { method: 'POST', body: JSON.stringify(amplifiers) });
+    return this._fetch('/pil/scan', {
+      method: 'POST',
+      body: JSON.stringify({ ...amplifiers, forceScan: true })
+    });
   },
   async getScore(symbol) { return this._fetch(`/pil/score/${symbol}`); },
   async getHistory(symbol, days = 7) { return this._fetch(`/pil/history/${symbol}?days=${days}`); },

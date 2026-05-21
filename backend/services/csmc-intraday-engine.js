@@ -15,6 +15,11 @@ const {
 } = require('./upstox-data');
 
 const {
+    fetchIntradayCandles,
+    fetchOptionChain
+} = require('../utils/upstox-client');
+
+const {
     getInstrumentMap
 } = require('../utils/instrument-resolver');
 
@@ -270,6 +275,36 @@ function getLiveLevels(
 }
 
 // -----------------------------------
+// ZERO-DEPENDENCY CONCURRENCY LIMITER
+// -----------------------------------
+function pLimit(concurrency) {
+    let activeCount = 0;
+    const queue = [];
+
+    const next = () => {
+        activeCount--;
+        if (queue.length > 0) {
+            queue.shift()();
+        }
+    };
+
+    return (fn) => new Promise((resolve, reject) => {
+        const run = () => {
+            activeCount++;
+            const promise = Promise.resolve().then(fn);
+            resolve(promise);
+            promise.then(next, next);
+        };
+
+        if (activeCount < concurrency) {
+            run();
+        } else {
+            queue.push(run);
+        }
+    });
+}
+
+// -----------------------------------
 // MAIN ENGINE
 // -----------------------------------
 async function processTick(io = null) {
@@ -422,17 +457,16 @@ async function processTick(io = null) {
             await getMarketQuotes(keys);
 
         // -----------------------------------
-        // PROCESS STOCKS
+        // PROCESS STOCKS (Parallelized)
         // -----------------------------------
-        for (const symbol of aList) {
-
+        const processStock = async (symbol) => {
             try {
 
                 const key =
                     instrumentMap[symbol];
 
                 if (!key) {
-                    continue;
+                    return;
                 }
 
                 let state =
@@ -468,14 +502,14 @@ async function processTick(io = null) {
                     )
                 ) {
 
-                    continue;
+                    return;
                 }
 
                 const quote =
                     quotes[key];
 
                 if (!quote) {
-                    continue;
+                    return;
                 }
 
                 // LIVE DATA
@@ -489,31 +523,14 @@ async function processTick(io = null) {
                     quote.volume;
 
                 // -----------------------------------
-                // OPTION CHAIN CACHE
+                // OPTION CHAIN CACHE (Centralized)
                 // -----------------------------------
-                const optionCacheKey =
-                    `option:${key}`;
-
                 let optionChain =
-                    getCache(
-                        optionCacheKey,
-                        CACHE_TTL
-                            .OPTION_CHAIN
+                    await fetchOptionChain(
+                        getOptionChain,
+                        key,
+                        ''
                     );
-
-                if (!optionChain) {
-
-                    optionChain =
-                        await getOptionChain(
-                            key,
-                            ''
-                        );
-
-                    setCache(
-                        optionCacheKey,
-                        optionChain
-                    );
-                }
 
                 // LIVE LEVELS
                 const levels =
@@ -529,30 +546,13 @@ async function processTick(io = null) {
                     levels.resistance;
 
                 // -----------------------------------
-                // CANDLE CACHE
+                // CANDLE CACHE (Centralized)
                 // -----------------------------------
-                const candleCacheKey =
-                    `candles:${key}`;
-
                 let candles1m =
-                    getCache(
-                        candleCacheKey,
-                        CACHE_TTL
-                            .CANDLES
+                    await fetchIntradayCandles(
+                        getIntradayCandles,
+                        key
                     );
-
-                if (!candles1m) {
-
-                    candles1m =
-                        await getIntradayCandles(
-                            key
-                        );
-
-                    setCache(
-                        candleCacheKey,
-                        candles1m
-                    );
-                }
 
                 const candles5m =
                     build5MinCandles(
@@ -610,7 +610,7 @@ async function processTick(io = null) {
 
                     await state.save();
 
-                    continue;
+                    return;
                 }
 
                 // -----------------------------------
@@ -843,7 +843,7 @@ async function processTick(io = null) {
 
                                 await state.save();
 
-                                continue;
+                                return;
                             }
 
                             state.quantity =
@@ -1066,7 +1066,10 @@ async function processTick(io = null) {
                     stockError
                 );
             }
-        }
+        };
+
+        const limit = pLimit(CSMC_CONFIG.POLL_CONCURRENCY || 4);
+        await Promise.all(aList.map(symbol => limit(() => processStock(symbol))));
 
     } catch (err) {
 

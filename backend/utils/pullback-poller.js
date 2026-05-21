@@ -29,6 +29,11 @@ const {
 } = require('../services/upstox-data');
 
 const {
+  fetchIntradayCandles,
+  fetchHistoricalCandles
+} = require('./upstox-client');
+
+const {
   getInstrumentMap
 } = require('./instrument-resolver');
 
@@ -494,36 +499,19 @@ async function processStock({
   try {
 
     // -----------------------------------
-    // INTRADAY CACHE
+    // INTRADAY CACHE (Centralized)
     // -----------------------------------
-    const intradayCacheKey =
-      `intraday:${symbol}`;
-
     let candles1m =
-      getCache(
-
-        intradayCacheKey,
-
-        CONFIG.CACHE_TTL.INTRADAY
-      );
-
-    if (!candles1m) {
-
-      candles1m =
-        await retry(() =>
-
-          withTimeout(
-            getIntradayCandles(
-              instrKey
+      await fetchIntradayCandles(
+        async (symbol) => {
+          return await retry(() =>
+            withTimeout(
+              getIntradayCandles(symbol)
             )
-          )
-        );
-
-      setCache(
-        intradayCacheKey,
-        candles1m
+          );
+        },
+        instrKey
       );
-    }
 
     if (
 
@@ -554,37 +542,20 @@ async function processStock({
     }
 
     // -----------------------------------
-    // DAILY CACHE
+    // DAILY CACHE (Centralized)
     // -----------------------------------
-    const dailyCacheKey =
-      `daily:${symbol}`;
-
     let dailyCandles =
-      getCache(
-
-        dailyCacheKey,
-
-        CONFIG.CACHE_TTL.DAILY
-      );
-
-    if (!dailyCandles) {
-
-      dailyCandles =
-        await retry(() =>
-
-          withTimeout(
-            getHistoricalCandles(
-              instrKey,
-              10
+      await fetchHistoricalCandles(
+        async (symbol, days) => {
+          return await retry(() =>
+            withTimeout(
+              getHistoricalCandles(symbol, days)
             )
-          )
-        );
-
-      setCache(
-        dailyCacheKey,
-        dailyCandles
+          );
+        },
+        instrKey,
+        10
       );
-    }
 
     const yesterday =
       getLastCompletedDailyCandle(
